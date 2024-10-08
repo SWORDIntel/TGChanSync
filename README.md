@@ -8,7 +8,7 @@ After=network.target
 [Service]
 User=your_user_name
 WorkingDirectory=/path/to/your/script
-ExecStart=/usr/bin/python3 /vxpy.py
+ExecStart=/usr/bin/python3 /boobies.py
 Restart=always
 
 [Install]
