@@ -1,0 +1,180 @@
+You are running on the T420, which is acting as the routed gateway for a directly connected T320 Proxmox server.
+
+Known intended topology:
+
+Main LAN / Internet
+        |
+       T420
+        |
+        | nic1 = 192.168.0.1/24
+        |
+       T320
+          vmbr0 = 192.168.0.75/24
+          gateway = 192.168.0.1
+          bridge-ports nic0
+
+The T420 is intended to route/NAT traffic between the T320 subnet 192.168.0.0/24 and the main LAN/Internet.
+
+Current observations:
+
+On the T320, the live temporary configuration has been corrected successfully:
+
+vmbr0 = 192.168.0.75/24
+default via 192.168.0.1 dev vmbr0
+
+These tests succeed from T320:
+
+ping 192.168.0.1
+ping 1.1.1.1
+apt update
+
+Therefore:
+- T320 -> T420 L2/L3 connectivity works.
+- T420 forwarding/NAT to the Internet works.
+- DNS works.
+- 192.168.0.0/24 dev vmbr0 in the T320 route table is correct and must NOT be changed to .1.
+
+However, connections involving the servers are failing, and the T320 persistent configuration is stale.
+
+Current /etc/network/interfaces on T320 contains:
+
+auto lo
+iface lo inet loopback
+
+iface nic0 inet manual
+
+auto vmbr0
+iface vmbr0 inet static
+        address 192.168.1.75/24
+        gateway 192.168.0.1
+        bridge-ports nic0
+        bridge-stp off
+        bridge-fd 0
+
+iface nic1 inet manual
+
+source /etc/network/interfaces.d/*
+
+The address 192.168.1.75/24 line is wrong. The intended persistent T320 address is 192.168.0.75/24.
+
+MISSION
+
+Diagnose the complete T420 <-> T320 routing path and fix it safely.
+
+You have shell access on the T420. Use SSH to the T320 at 192.168.0.75 if available.
+
+1. Inspect before modifying anything
+
+On T420 collect:
+
+ip -br addr
+ip route
+ip rule
+sysctl net.ipv4.ip_forward
+iptables-save
+nft list ruleset
+
+Determine:
+- which T420 interface faces the main LAN;
+- whether nic1 is actually 192.168.0.1/24;
+- whether forwarding is enabled;
+- whether NAT/MASQUERADE exists for 192.168.0.0/24;
+- whether FORWARD rules permit traffic in both required directions;
+- whether any conflicting routes exist.
+
+Then inspect T320:
+
+ip -br addr
+ip route
+bridge link
+cat /etc/network/interfaces
+ss -lntp
+
+2. Correct T320 persistence
+
+Back up the file first:
+
+cp -a /etc/network/interfaces /etc/network/interfaces.bak.$(date +%Y%m%d-%H%M%S)
+
+The desired T320 bridge configuration is:
+
+auto vmbr0
+iface vmbr0 inet static
+        address 192.168.0.75/24
+        gateway 192.168.0.1
+        bridge-ports nic0
+        bridge-stp off
+        bridge-fd 0
+
+Preserve unrelated configuration.
+
+Do not bounce vmbr0, restart networking, or reboot while connected remotely unless necessary. The live configuration already works; persistence can be fixed without deliberately dropping the session.
+
+3. Investigate inbound connectivity
+
+The important issue is not merely T320 outbound Internet access.
+
+Determine whether hosts on the main LAN can initiate connections to 192.168.0.75.
+
+Check whether the main LAN has a route back to:
+192.168.0.0/24 via <T420-main-LAN-IP>
+
+If it does not, identify the cleanest solution.
+
+Preferred architecture is real routing:
+Main LAN router:
+192.168.0.0/24 via <T420-main-LAN-IP>
+
+rather than hiding everything behind NAT, if the upstream router supports static routes.
+
+If upstream routing cannot be modified, determine the minimum NAT/forwarding configuration required on T420 for the actual intended connectivity and explain the resulting limitation for inbound connections.
+
+4. Check Proxmox-specific dependencies
+
+Because T320 is a Proxmox host, inspect for references to the old address:
+
+grep -R "192\.168\.1\.75" /etc/hosts /etc/network /etc/pve 2>/dev/null
+hostname -f
+getent hosts "$(hostname -f)"
+pvecm status 2>/dev/null || true
+
+Do not blindly modify /etc/pve or cluster configuration.
+
+If the old IP is embedded in Corosync/cluster configuration, report it before making potentially cluster-disruptive changes.
+
+Check that services expected to be reachable are listening:
+
+ss -lntp | grep -E ':22|:8006'
+
+5. Validation
+
+At completion verify from T320:
+
+ping -c 3 192.168.0.1
+ping -c 3 1.1.1.1
+getent hosts deb.debian.org
+ip route
+
+From T420:
+
+ping -c 3 192.168.0.75
+curl -kI --connect-timeout 5 https://192.168.0.75:8006/
+
+Also test from a host on the main LAN if accessible.
+
+Safety constraints:
+- Preserve the currently working T320 outbound path.
+- Do not change T320 to 192.168.0.1; that address belongs to T420.
+- Do not change the connected route 192.168.0.0/24 into 192.168.0.1/24.
+- Do not flush entire nftables/iptables rulesets.
+- Do not restart networking blindly over SSH.
+- Back up every persistent configuration before editing.
+- Prefer minimal, auditable changes.
+- If changing the T420 could interrupt its own upstream connection, stop and report the proposed command first.
+
+Work autonomously through inspection and safe fixes. At the end report:
+1. root cause(s);
+2. files/rules changed;
+3. resulting route/NAT topology;
+4. validation results;
+5. any remaining issue preventing main-LAN -> T320 connectivity.
